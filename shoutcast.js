@@ -1,56 +1,35 @@
-var net = require("net")
-,fs = require("fs")
-,sys = require("sys")
-,http = require('http')
-,file = require('./lib/file');
+var net = require("net"),
+  fs = require("fs"),
+  util = require("util"),
+  http = require('http'),
+  file = require('./lib/file');
 
-var song_queue = {
-  songs: [],
-  idx: 0
-};
+var song_queue = { songs: [], idx: 0 };
 
 var STATION = {
   NAME: 'Node Shoutcasts R Us',
   GENRE: 'Musak',
   URL: 'http://github.com/ncb000gt/node-shoutcast/',
-  NOTICE: 'I\'m a little teapot...'
+  NOTICE: 'I\'m a little teapot...',
+  PLAYLIST: 'samples',
+  QUEUE_SIZE: 20
 };
 
-var config = require('/usr/local/etc/node-shoutcast/config');
-sys.debug('config: ' + JSON.stringify(config));
-if ('STATION' in config) {
-  var config_station = config.STATION;
-  if ('NAME' in config_station) {
-    STATION.NAME = config_station.NAME;
-  } else if ('GENRE' in config_station) {
-    STATION.GENRE = config_station.GENRE;
-  } else if ('URL' in config_station) {
-    STATION.URL = config_station.URL;
-  } else if ('NOTICE' in config_station) {
-    STATION.NOTICE = config_station.NOTICE;
+try {
+  var config = require(
+    process.env.NODE_SHOUTCAST_CONFIG ||
+    '/usr/local/etc/node-shoutcast/config'
+  );
+
+  if('STATION' in config) {
+    for(var key in config.STATION) { STATION[key] = config.STATION[key]; }
   }
+} catch(e) {
+  console.log('Failed to load config. Using default settings.');
 }
 
-var PLAYLIST = config.PLAYLIST;
-var QUEUE_SIZE = config.QUEUE_SIZE || 10;
-
-sys.debug('PLAYLIST: ' + PLAYLIST);
+var PLAYLIST = STATION.PLAYLIST, QUEUE_SIZE = STATION.QUEUE_SIZE;
 var stats = fs.statSync(PLAYLIST);
-if (stats.isDirectory()) {
-  file.walkSync(PLAYLIST, function(p, dirs, files) {
-                  var len = files.length;
-                  for (var i = 0; i < len; i++) {
-                    var file = files[i];
-                    if (file.indexOf('.mp3') >= 0) {
-                      song_queue.songs.push(p+'/'+file);
-                    }
-                    if (song_queue.songs.length > QUEUE_SIZE) {
-                      break;
-                    }
-                  }
-                });
-}
-
 var headers = {
   'icy-notice1': STATION.NOTICE,
   'icy-notice2': "NodeJS Streaming Shoutcast Server/v0.1",
@@ -62,83 +41,95 @@ var headers = {
   'icy-br':'56',
   'icy-metaint': '0'//1024'
 };
-
-var currentSong = null;
-var filetoread = "/home/ncampbell/Music/Amazon MP3/David Guetta/One Love (Deluxe Version)/Memories (Feat Kid Cudi).mp3";
-
 var bytesOut = 0;
 
-http.createServer(
-  function (req, res) {
-    var o = req.headers;
-    for (var p in o) {
-      sys.puts(p + ': ' + o[p]);
+util.debug('Playing the playlist from: ' + PLAYLIST);
+
+if(stats.isDirectory()) {
+  file.walkSync(PLAYLIST, function(p, dirs, files) {
+    for(var i = 0; i < files.length; i++) {
+      var file = files[i];
+
+      if(file.indexOf('.mp3') >= 0) {
+        console.log(file);
+
+        song_queue.songs.push(p + '/' + file);
+      }
+
+      if(song_queue.songs.length > QUEUE_SIZE) { break; }
     }
+  });
+}
 
-    sys.puts('Starting stream...');
+http.createServer(function (req, res) {
+  var o = req.headers;
 
-    res.writeHead(200, headers);
-
-    //TODO: pop song and make read song as a stream separate from the request, requests should just tie into the already running stream
-    var song = song_queue.songs[song_queue.idx];
-    sys.debug('song: ' + song);
-    var fStream = fs.createReadStream(song, {bufferSize:1024});
-
-    pump(fStream, res, function() { sys.puts("No more data. Closing."); });
-
-  }).listen(7000);
-
-setInterval(function() {
-              sys.debug('Total Bytes Written: ' + bytesOut);
-            }, 3000);
-
-sys.puts('Server running at http://0.0.0.0:7000/');
-
-function pump(readStream, writeStream, callback) {
-  var callbackCalled = false;
-
-  function call (a, b, c) {
-    if (callback && !callbackCalled) {
-      callback(a, b, c);
-      callbackCalled = true;
-    }
+  for(var p in o) {
+    util.puts(p + ': ' + o[p]);
   }
 
-  if (!readStream.pause) readStream.pause = function () {readStream.emit("pause")};
-  if (!readStream.resume) readStream.resume = function () {readStream.emit("resume")};
+  util.puts('Starting stream...');
 
-  readStream.addListener("data", function (chunk) {
-                           bytesOut+=chunk.length;
-                           if (writeStream.write(chunk) === false) readStream.pause();
-                         });
+  res.writeHead(200, headers);
 
-  writeStream.addListener("pause", function () {
-                            readStream.pause();
-                          });
+  // TODO: pop song and make read song as a stream separate from the request.
+  // Requests should just tie into the already running stream
+  var song = song_queue.songs[song_queue.idx];
 
-  writeStream.addListener("drain", function () {
-                            readStream.resume();
-                          });
+  util.debug('song: ' + song);
 
-  writeStream.addListener("resume", function () {
-                            readStream.resume();
-                          });
+  function startPumping(err) {
+    var song = song_queue.songs[song_queue.idx];
 
-  readStream.addListener("end", function () {
-                           writeStream.end();
-                         });
+    if(song_queue.idx >= song_queue.songs.length) {
+      util.puts("No more data. Closing.");
 
-  readStream.addListener("close", function () {
-                           call();
-                         });
+      res.end();
+    } else {
+      util.puts("Pumping next song.");
+
+      var fStream = fs.createReadStream(song, { bufferSize:1024 });
+
+      pump(fStream, res, startPumping)
+    }
+    song_queue.idx++;
+  }
+
+  startPumping();
+}).listen(7000);
+
+setInterval(function() { util.debug('Total Bytes Written: ' + bytesOut); }, 5000);
+
+util.puts('Server running at http://0.0.0.0:7000/');
+
+function pump(readStream, writeStream, callback) {
+  function call() { if(callback) { callback(arguments); callback = null; }}
+
+  readStream.pause = function() { readStream.emit("pause"); }
+  readStream.resume = function() { readStream.emit("resume") };
+
+  readStream.addListener("data", function(chunk) {
+    bytesOut += chunk.length;
+
+    if(writeStream.write(chunk) === false) { readStream.pause(); }
+  });
+
+  writeStream.addListener("pause", function () { readStream.pause(); });
+  writeStream.addListener("drain", function () { readStream.resume(); });
+  writeStream.addListener("resume", function () { readStream.resume(); });
+
+  readStream.addListener("end", function () {});
+  readStream.addListener("close", function () { call(); });
 
   readStream.addListener("error", function (err) {
-                           writeStream.end();
-                           call(err);
-                         });
+    writeStream.end();
+
+    call(err);
+  });
 
   writeStream.addListener("error", function (err) {
-                            readStream.destroy();
-                            call(err);
-                          });
+    readStream.destroy();
+
+    call(err);
+  });
 };
